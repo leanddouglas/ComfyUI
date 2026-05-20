@@ -230,6 +230,40 @@ def test_cursor_walks_for_non_name_sorts(sort_field, http: requests.Session, api
     assert set(seen) == set(names), f"missing items for sort={sort_field}: expected {set(names)}, got {set(seen)}"
 
 
+def test_cursor_order_mismatch_returns_400(http: requests.Session, api_base: str, asset_factory, make_asset_bytes):
+    """A cursor minted under desc order replayed against asc must 400, not
+    silently walk the wrong direction."""
+    _seed(asset_factory, make_asset_bytes, count=3, tag="cursor-order-flip")
+
+    r = http.get(
+        api_base + "/api/assets",
+        params={
+            "include_tags": "unit-tests,cursor-order-flip",
+            "sort": "name",
+            "order": "desc",
+            "limit": "1",
+        },
+        timeout=120,
+    )
+    cursor = r.json()["next_cursor"]
+    assert cursor is not None
+
+    # Replay with order flipped to asc — server must reject the cursor.
+    r2 = http.get(
+        api_base + "/api/assets",
+        params={
+            "include_tags": "unit-tests,cursor-order-flip",
+            "sort": "name",
+            "order": "asc",
+            "limit": "1",
+            "after": cursor,
+        },
+        timeout=120,
+    )
+    assert r2.status_code == 400, r2.text
+    assert r2.json()["error"]["code"] == "INVALID_CURSOR"
+
+
 def test_cursor_invalid_cursor_at_microsecond_boundary(http: requests.Session, api_base: str):
     """A cursor carrying an out-of-range microsecond timestamp must map to
     400 INVALID_CURSOR, not 500."""

@@ -290,7 +290,7 @@ def list_assets_page(
             raise InvalidCursorError(
                 f"cursor pagination is not supported for sort={sort!r}"
             )
-        payload = decode_cursor(after, _CURSOR_SORT_FIELDS)
+        payload = decode_cursor(after, _CURSOR_SORT_FIELDS, expected_order=order)
         if payload.sort_field != sort:
             raise InvalidCursorError(
                 f"cursor sort field {payload.sort_field!r} does not match request sort {sort!r}"
@@ -323,7 +323,7 @@ def list_assets_page(
             # There's at least one more row past this page — mint a cursor from
             # the last row of the page (i.e. index `limit - 1`, since we
             # over-fetched), and drop the sentinel.
-            next_cursor = _encode_next_cursor(refs[limit - 1], sort)
+            next_cursor = _encode_next_cursor(refs[limit - 1], sort, order)
             refs = refs[:limit]
 
         items: list[AssetSummaryData] = []
@@ -350,7 +350,7 @@ def _resolve_cursor_value(payload: CursorPayload) -> object:
     return payload.value  # name, str-typed
 
 
-def _encode_next_cursor(ref, sort: str) -> str | None:
+def _encode_next_cursor(ref, sort: str, order: str) -> str | None:
     """Mint a cursor pointing at *ref* for the given sort dimension.
 
     Returns None when the boundary row carries a NULL sort value (e.g. an asset
@@ -359,16 +359,16 @@ def _encode_next_cursor(ref, sort: str) -> str | None:
     truncate cleanly here than to mint a cursor that mis-positions.
     """
     if sort == "name":
-        return encode_cursor("name", ref.name, ref.id)
+        return encode_cursor("name", ref.name, ref.id, order=order)
     if sort == "size":
         if ref.asset is None or ref.asset.size_bytes is None:
             return None
-        return encode_cursor("size", str(ref.asset.size_bytes), ref.id)
+        return encode_cursor("size", str(ref.asset.size_bytes), ref.id, order=order)
     # created_at / updated_at — DB datetimes are naive UTC; attach tz before encoding.
     value = ref.created_at if sort == "created_at" else ref.updated_at
     if value is None:
         return None
-    return encode_cursor_from_time(sort, value.replace(tzinfo=timezone.utc), ref.id)
+    return encode_cursor_from_time(sort, value.replace(tzinfo=timezone.utc), ref.id, order=order)
 
 
 def resolve_hash_to_path(

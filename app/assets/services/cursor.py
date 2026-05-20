@@ -1,18 +1,29 @@
 """Opaque keyset-pagination cursor for /api/assets.
 
-Wire format mirrors the cloud Go implementation in
-`common/pagination/cursor.go` so both runtimes produce byte-identical
-cursors for the same `(sort_field, value, id)` triple and the frontend
-sees one contract.
+Wire format aligns with the cloud Go implementation in
+`common/pagination/cursor.go` so the frontend sees one contract across
+runtimes. Payload JSON uses short keys to keep the encoded length small:
 
-Payload JSON uses short keys to keep the encoded length small:
+    {"s": <sort_field>, "v": <value>, "id": <id>, "o": <order>}
 
-    {"s": <sort_field>, "v": <value>, "id": <id>}
+The `o` key binds the cursor to the sort direction it was minted under,
+so replaying a `desc` cursor against an `asc` request fails with
+``INVALID_CURSOR`` rather than silently walking the wrong direction.
+Decoders accept payloads without `o` for backward compatibility with
+cursors minted before the binding was introduced (these skip the order
+check); new cursors always include it. Cloud has a follow-up to mirror
+the field — until then, Python and cloud cursors differ by exactly the
+`o` key.
 
-Encoding is base64url with no padding. Time values are serialized as Unix
-microseconds (UTC) — microsecond precision matches PostgreSQL's
-`timestamp` type, so a cursor minted from a stored timestamp compares
-back exactly without rounding rows in the same millisecond bucket.
+Encoding is base64url with no padding. JSON serialization escapes `<`,
+`>`, `&`, U+2028, and U+2029 to match Go's default `json.Marshal`
+behavior so asset names containing those characters produce
+byte-identical cursors across runtimes.
+
+Time values are serialized as Unix microseconds (UTC) — microsecond
+precision matches PostgreSQL's `timestamp` type, so a cursor minted from
+a stored timestamp compares back exactly without rounding rows in the
+same millisecond bucket.
 """
 from __future__ import annotations
 
@@ -50,16 +61,43 @@ class CursorPayload:
     sort_field: str
     value: str
     id: str
+    # None means "minted by a producer that did not bind order" (e.g. a cloud
+    # cursor from before BE-944's follow-up lands). New cursors always set it.
+    order: str | None = None
 
 
-def encode_cursor(sort_field: str, value: str, id: str) -> str:
-    """Encode a cursor payload as a base64url (no-padding) string."""
-    payload = {"s": sort_field, "v": value, "id": id}
-    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+# Order direction tokens. Mirrored on the cloud follow-up so cursors carrying
+# `o` are interchangeable between runtimes once both sides ship the field.
+_VALID_ORDERS = ("asc", "desc")
 
 
-def encode_cursor_from_time(sort_field: str, t: datetime, id: str) -> str:
+def encode_cursor(sort_field: str, value: str, id: str, order: str = "desc") -> str:
+    """Encode a cursor payload as a base64url (no-padding) string.
+
+    `order` binds the cursor to the sort direction it was minted under so a
+    later request with a flipped `order` query parameter is rejected with
+    ``INVALID_CURSOR`` rather than silently walking the wrong direction.
+    """
+    if order not in _VALID_ORDERS:
+        raise ValueError(f"order must be one of {_VALID_ORDERS}, got {order!r}")
+    payload = {"s": sort_field, "v": value, "id": id, "o": order}
+    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    # Go's default `json.Marshal` escapes these characters in string values; we
+    # do the same so an asset name containing one of them produces byte-
+    # identical cursors across runtimes. None of these characters appear in
+    # JSON structural syntax, so a global replace on the serialized output is
+    # safe — it can only touch characters from the encoded values.
+    raw = (
+        raw.replace("<", "\\u003c")
+           .replace(">", "\\u003e")
+           .replace("&", "\\u0026")
+           .replace(" ", "\\u2028")
+           .replace(" ", "\\u2029")
+    )
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).rstrip(b"=").decode("ascii")
+
+
+def encode_cursor_from_time(sort_field: str, t: datetime, id: str, order: str = "desc") -> str:
     """Encode a time-typed cursor at Unix microsecond precision.
 
     Accepts an aware datetime (any timezone) and normalizes to UTC. Naive
@@ -69,16 +107,25 @@ def encode_cursor_from_time(sort_field: str, t: datetime, id: str) -> str:
     if t.tzinfo is None:
         raise ValueError("encode_cursor_from_time requires an aware datetime")
     micros = _datetime_to_unix_micros(t.astimezone(timezone.utc))
-    return encode_cursor(sort_field, str(micros), id)
+    return encode_cursor(sort_field, str(micros), id, order=order)
 
 
-def decode_cursor(cursor: str, allowed_sort_fields: Iterable[str]) -> CursorPayload:
+def decode_cursor(
+    cursor: str,
+    allowed_sort_fields: Iterable[str],
+    expected_order: str | None = None,
+) -> CursorPayload:
     """Parse an opaque cursor.
 
     ``allowed_sort_fields`` is the endpoint's accepted sort-field list — a
     cursor carrying a field outside this set is rejected so a cursor minted
     for one column can't be replayed against another (e.g. a ``created_at``
     timestamp string compared against a ``name`` column).
+
+    ``expected_order`` (``"asc"``/``"desc"``), when supplied, must match the
+    payload's ``o`` field. Cursors minted without ``o`` (e.g. by an older
+    cloud build) pass the check unconditionally — the binding is best-effort
+    until both runtimes ship the field.
 
     Passing no allowed fields rejects every cursor.
     """
@@ -104,6 +151,7 @@ def decode_cursor(cursor: str, allowed_sort_fields: Iterable[str]) -> CursorPayl
     sort_field = decoded.get("s")
     value = decoded.get("v")
     id = decoded.get("id")
+    order = decoded.get("o")  # may be absent on legacy cursors
 
     if not isinstance(sort_field, str) or not isinstance(value, str) or not isinstance(id, str):
         raise InvalidCursorError("payload: missing or non-string s/v/id")
@@ -118,7 +166,16 @@ def decode_cursor(cursor: str, allowed_sort_fields: Iterable[str]) -> CursorPayl
     if sort_field not in allowed_sort_fields:
         raise InvalidCursorError(f"unsupported sort field {sort_field!r}")
 
-    return CursorPayload(sort_field=sort_field, value=value, id=id)
+    if order is not None and not isinstance(order, str):
+        raise InvalidCursorError("payload: non-string o")
+    if order is not None and order not in _VALID_ORDERS:
+        raise InvalidCursorError(f"unsupported order {order!r}")
+    if expected_order is not None and order is not None and order != expected_order:
+        raise InvalidCursorError(
+            f"cursor order {order!r} does not match request order {expected_order!r}"
+        )
+
+    return CursorPayload(sort_field=sort_field, value=value, id=id, order=order)
 
 
 def decode_cursor_time(payload: Optional[CursorPayload]) -> datetime:
