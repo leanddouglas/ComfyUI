@@ -265,7 +265,7 @@ class DA3Inference(io.ComfyNode):
                         io.Combo.Input("pose_method",
                                        options=["cam_dec", "ray_pose"],
                                        default="cam_dec",
-                                               tooltip="How the camera field-of-view is estimated (ignored on Mono/Metric models).\n"
+                                               tooltip="How the camera field-of-view is estimated (for Small/Base models only).\n"
                                                "- cam_dec: learned from image features.\n"
                                                "- ray_pose: derived geometrically from the model's 3-D ray output.\n"
                                                "Affects perspective correctness of the 3-D output. Try both if results look distorted."),
@@ -534,10 +534,10 @@ class DA3GeometryToMesh(io.ComfyNode):
                                tooltip="Drop triangles whose 3×3 depth span exceeds this fraction. 0 = off."),
                 io.Float.Input("confidence_threshold", default=0.1, min=0.0, max=1.0, step=0.01,
                                tooltip="Exclude pixels whose per-image normalised confidence is below this value (0 = keep all, 1 = keep only the single most confident pixel). "
-                                       "Ignored when the geometry has no confidence map (Mono/Metric models)."),
+                                       "Used when the geometry has confidence map (Small/Base models)."),
                 io.Boolean.Input("use_sky_mask", default=True,
                                  tooltip="Exclude sky-probability pixels (sky >= 0.5) from the mesh. "
-                                         "Ignored when the geometry has no sky map (Small/Base models)."),
+                                         "Used when the geometry has sky map (Mono/Metric models)."),
                 io.Boolean.Input("texture", default=True,
                                  tooltip="Use the source image as a base color texture."),
             ],
@@ -631,10 +631,10 @@ class DA3GeometryToPointCloud(io.ComfyNode):
                              tooltip="Which image of a batch to convert."),
                 io.Float.Input("confidence_threshold", default=0.1, min=0.0, max=1.0, step=0.01,
                                tooltip="Exclude pixels whose per-image normalised confidence is below this value (0 = keep all). "
-                                       "Ignored when the geometry has no confidence map."),
+                                       "Used when the geometry has confidence map (Small/Base models)."),
                 io.Boolean.Input("use_sky_mask", default=True,
                                  tooltip="Exclude sky-probability pixels (sky >= 0.5). "
-                                         "Ignored when the geometry has no sky map."),
+                                         "Used when the geometry has sky map (Mono/Metric models)."),
                 io.Int.Input("downsample", default=1, min=1, max=16,
                              tooltip="Take every Nth pixel (1 = full resolution). "
                                      "Higher values give fewer points and faster processing."),
