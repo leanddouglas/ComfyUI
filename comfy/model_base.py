@@ -44,6 +44,7 @@ import comfy.ldm.lumina.model
 import comfy.ldm.wan.model
 import comfy.ldm.wan.model_animate
 import comfy.ldm.wan.ar_model
+import comfy.ldm.cube.gpt
 import comfy.ldm.wan.model_wandancer
 import comfy.ldm.hunyuan3d.model
 import comfy.ldm.triposplat.model
@@ -1902,6 +1903,26 @@ class Hunyuan3Dv2(BaseModel):
         if guidance is not None:
             out['guidance'] = comfy.conds.CONDRegular(torch.FloatTensor([guidance]))
         return out
+
+class Cube3D(BaseModel):
+    """Roblox Cube3D shape GPT (autoregressive). Generation goes through the
+    dedicated `cube` sampler (SamplerCustomAdvanced), never KSampler/apply_model."""
+    def __init__(self, model_config, model_type=ModelType.EPS, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.cube.gpt.DualStreamRoformer)
+
+    def _apply_model(self, *args, **kwargs):
+        raise RuntimeError(
+            "Cube3D is an autoregressive token model. Use the 'cube' sampler "
+            "(SamplerCube + SamplerCustomAdvanced), not KSampler."
+        )
+
+    def extra_conds(self, **kwargs):
+        out = {}
+        cross_attn = kwargs.get("cross_attn", None)
+        if cross_attn is not None:
+            out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
+        return out
+
 
 class Hunyuan3Dv2_1(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):

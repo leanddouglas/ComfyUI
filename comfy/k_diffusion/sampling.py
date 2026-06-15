@@ -1955,3 +1955,110 @@ def sample_ar_video(model, x, sigmas, extra_args=None, callback=None, disable=No
         transformer_options.pop("ar_state", None)
 
     return output
+
+
+def _cube_process_logits(logits, top_p, generator):
+    """Token selection. top_p>=1 or <=0 -> greedy argmax (upstream default, deterministic)."""
+    if top_p is None or top_p >= 1.0 or top_p <= 0.0:
+        return torch.argmax(logits, dim=-1, keepdim=True)
+    sorted_logits, sorted_idx = logits.sort(dim=-1, descending=True)
+    remove = sorted_logits.softmax(dim=-1).cumsum(dim=-1) > top_p
+    remove[..., 0] = False
+    idx_remove = remove.scatter(-1, sorted_idx, remove)
+    logits = logits.masked_fill(idx_remove, float("-inf"))
+    probs = torch.softmax(logits, dim=-1)
+    return torch.multinomial(probs, num_samples=1, generator=generator)
+
+
+@torch.no_grad()
+def sample_cube(model, x, sigmas, extra_args=None, callback=None, disable=None, top_p=1.0):
+    """
+    Autoregressive sampler for Roblox Cube3D shape GPT (DualStreamRoformer).
+
+    Not a diffusion sampler: the noised input `x` and `sigmas` values are ignored;
+    only x's shape (batch, num_tokens) is used. Generates a 1024-long sequence of VQ
+    token IDs from CLIP text conditioning, with upstream's linearly-decaying CFG and
+    optional top-p. Plugs into SamplerCustomAdvanced via the SamplerCube node.
+
+    Faithful to cube3d.inference.engine.Engine.run_gpt:
+      gamma_i = cfg * (T - i) / T ;  logits = (1+gamma)*cond - gamma*uncond
+      fp32 weights + bf16 autocast on cuda.
+    """
+    import comfy.model_management
+    extra_args = {} if extra_args is None else extra_args
+
+    guider = model.inner_model        # CFGGuider
+    base_model = guider.inner_model   # BaseModel (Cube3D)
+    cube = base_model.diffusion_model
+    cfg = getattr(guider, "cfg", 3.0)
+
+    def get_cond(name):
+        conds = guider.conds.get(name, None)
+        if not conds:
+            return None
+        return conds[0]["model_conds"]["c_crossattn"].cond
+
+    pos = get_cond("positive")
+    neg = get_cond("negative")
+    if pos is None:
+        raise ValueError("sample_cube requires positive conditioning (CLIP-L text embeds).")
+
+    device = x.device
+    weight_dtype = base_model.get_dtype()
+    T = x.shape[1]
+    use_cfg = (cfg is not None) and (cfg > 0.0) and (neg is not None)
+    autocast_enabled = (device.type == "cuda")
+    cache_dtype = torch.bfloat16 if autocast_enabled else weight_dtype
+
+    def add_bbox(c):
+        if not getattr(cube, "use_bbox", False):
+            return c
+        bbox = torch.zeros((c.shape[0], 3), device=device, dtype=c.dtype)
+        return torch.cat([c, cube.bbox_proj(bbox).unsqueeze(1)], dim=1)
+
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=autocast_enabled):
+        cond = add_bbox(cube.encode_text(pos.to(device=device, dtype=weight_dtype)))
+        if use_cfg:
+            ucond = add_bbox(cube.encode_text(neg.to(device=device, dtype=weight_dtype)))
+            cond = torch.cat([cond, ucond], dim=0)
+
+        bos = torch.full((cond.shape[0], 1), cube.shape_bos_id, dtype=torch.long, device=device)
+        embed = cube.encode_token(bos)
+        Bp, input_seq_len, dim = embed.shape
+        embed_buffer = torch.zeros((Bp, input_seq_len + T, dim), dtype=embed.dtype, device=device)
+        embed_buffer[:, :input_seq_len, :].copy_(embed)
+
+        kv_cache = cube.init_kv_cache(Bp, cond.shape[1], T + 1, cache_dtype, device)
+
+        num_codes = cube.vocab_size - 3
+        seed = extra_args.get("seed", 0)
+        generator = None
+        if device.type != "mps":
+            generator = torch.Generator(device=device).manual_seed(int(seed))
+
+        output_ids = []
+        for i in trange(T, disable=disable):
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            curr_pos_id = torch.tensor([i], dtype=torch.long, device=device)
+            logits = cube(embed_buffer, cond, kv_cache=kv_cache, curr_pos_id=curr_pos_id, decode=(i > 0))
+            logits = logits[:, 0, :num_codes]
+
+            if use_cfg:
+                cond_logits, uncond_logits = logits.float().chunk(2, dim=0)
+                gamma = cfg * (T - i) / T
+                logits = (1.0 + gamma) * cond_logits - gamma * uncond_logits
+            else:
+                logits = logits.float()
+
+            next_id = _cube_process_logits(logits, top_p, generator)
+            output_ids.append(next_id)
+
+            next_embed = cube.encode_token(next_id)
+            if use_cfg:
+                next_embed = torch.cat([next_embed, next_embed], dim=0)
+            embed_buffer[:, i + input_seq_len, :].copy_(next_embed.squeeze(1))
+
+            if callback is not None:
+                callback({"x": x, "i": i, "sigma": sigmas[0], "sigma_hat": sigmas[0], "denoised": x})
+
+    return torch.cat(output_ids, dim=1).to(torch.float32)

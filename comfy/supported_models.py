@@ -1550,6 +1550,30 @@ class Hunyuan3Dv2mini(Hunyuan3Dv2):
 
     latent_format = latent_formats.Hunyuan3Dv2mini
 
+
+class Cube3D(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "cube3d",
+    }
+
+    unet_extra_config = {}
+
+    sampling_settings = {}
+
+    latent_format = latent_formats.LatentFormat
+
+    memory_usage_factor = 1.0
+
+    # Upstream keeps fp32 weights and uses bf16 autocast during the forward pass
+    # (see sample_cube). Prefer fp32 weights for parity; bf16 is the low-VRAM fallback.
+    supported_inference_dtypes = [torch.float32, torch.bfloat16]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.Cube3D(self, device=device)
+
+    def clip_target(self, state_dict={}):
+        return None
+
 class TripoSplat(supported_models_base.BASE):
     # Image -> 3D gaussian splat flow denoiser
     unet_config = {
@@ -2292,6 +2316,7 @@ models = [
     Hunyuan3Dv2mini,
     Hunyuan3Dv2,
     Hunyuan3Dv2_1,
+    Cube3D,
     TripoSplat,
     HiDream,
     HiDreamO1,

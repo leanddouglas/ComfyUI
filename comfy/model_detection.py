@@ -654,6 +654,23 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
 
         return dit_config
 
+    if '{}shape_proj.weight'.format(key_prefix) in state_dict_keys and '{}lm_head.weight'.format(key_prefix) in state_dict_keys:  # Roblox Cube3D shape GPT
+        dit_config = {}
+        dit_config["image_model"] = "cube3d"
+        n_embd = state_dict['{}transformer.wte.weight'.format(key_prefix)].shape[1]
+        dit_config["n_embd"] = n_embd
+        dit_config["shape_model_vocab_size"] = state_dict['{}transformer.wte.weight'.format(key_prefix)].shape[0] - 3
+        dit_config["n_layer"] = count_blocks(state_dict_keys, '{}transformer.dual_blocks.'.format(key_prefix) + '{}.')
+        dit_config["n_single_layer"] = count_blocks(state_dict_keys, '{}transformer.single_blocks.'.format(key_prefix) + '{}.')
+        head_dim = state_dict['{}transformer.dual_blocks.0.attn.pre_x.q_norm.weight'.format(key_prefix)].shape[0]
+        dit_config["n_head"] = n_embd // head_dim
+        dit_config["shape_model_embed_dim"] = state_dict['{}shape_proj.weight'.format(key_prefix)].shape[1]
+        dit_config["text_model_embed_dim"] = state_dict['{}text_proj.weight'.format(key_prefix)].shape[1]
+        dit_config["use_bbox"] = '{}bbox_proj.weight'.format(key_prefix) in state_dict_keys
+        dit_config["bias"] = '{}text_proj.bias'.format(key_prefix) in state_dict_keys
+        dit_config["rope_theta"] = 10000
+        return dit_config
+
     if '{}latent_in.weight'.format(key_prefix) in state_dict_keys:  # Hunyuan 3D
         in_shape = state_dict['{}latent_in.weight'.format(key_prefix)].shape
         dit_config = {}

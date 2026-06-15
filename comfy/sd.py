@@ -16,6 +16,7 @@ import comfy.ldm.cosmos.vae
 import comfy.ldm.wan.vae
 import comfy.ldm.wan.vae2_2
 import comfy.ldm.hunyuan3d.vae
+import comfy.ldm.cube.vae
 import comfy.ldm.triposplat.vae
 import comfy.ldm.ace.vae.music_dcae_pipeline
 import comfy.ldm.cogvideo.vae
@@ -489,6 +490,7 @@ class VAE:
         self.disable_offload = False
         self.not_video = False
         self.size = None
+        self.cube3d = False
 
         self.downscale_index_formula = None
         self.upscale_index_formula = None
@@ -777,6 +779,25 @@ class VAE:
                 self.first_stage_model = comfy.ldm.hunyuan3d.vae.ShapeVAE()
                 self.working_dtypes = [torch.float16, torch.bfloat16, torch.float32]
 
+            # Roblox Cube3D shape tokenizer (OneDAutoEncoder, decode-only)
+            elif "bottleneck.block.codebook.weight" in sd:
+                self.cube3d = True
+                self.latent_dim = 1
+                embed_dim = sd["bottleneck.block.codebook.weight"].shape[1]
+                num_codes = sd["bottleneck.block.codebook.weight"].shape[0]
+                width = sd["bottleneck.block.c_out.weight"].shape[0]
+                num_encoder_latents = sd["decoder.positional_encodings"].shape[0]
+                head_dim = sd["decoder.blocks.0.attn.q_norm.weight"].shape[0]
+                num_heads = width // head_dim
+                num_freqs = sd["embedder.weight"].shape[1]
+                num_decoder_layers = len({k.split(".")[2] for k in sd if k.startswith("decoder.blocks.")})
+                self.first_stage_model = comfy.ldm.cube.vae.CubeShapeVAE(
+                    num_encoder_latents=num_encoder_latents, embed_dim=embed_dim, width=width,
+                    num_heads=num_heads, num_freqs=num_freqs, num_decoder_layers=num_decoder_layers,
+                    num_codes=num_codes,
+                )
+                self.memory_used_decode = lambda shape, dtype: (1000 * shape[1] * 768) * model_management.dtype_size(dtype)
+                self.working_dtypes = [torch.float32]
 
             elif "vocoder.backbone.channel_layers.0.0.bias" in sd: #Ace Step Audio
                 self.first_stage_model = comfy.ldm.ace.vae.music_dcae_pipeline.MusicDCAE(source_sample_rate=44100)
