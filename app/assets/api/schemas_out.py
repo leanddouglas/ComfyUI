@@ -14,6 +14,7 @@ class Asset(BaseModel):
     asset_hash: str | None = None
     size: int | None = None
     mime_type: str | None = None
+    file_path: str | None = None
     tags: list[str] = Field(default_factory=list)
     preview_url: str | None = None
     preview_id: str | None = None  # references an asset_reference id, not an asset id

@@ -34,6 +34,7 @@ from app.assets.services.file_utils import get_size_and_mtime_ns
 from app.assets.services.image_dimensions import extract_image_dimensions
 from app.assets.services.path_utils import (
     compute_relative_filename,
+    get_backend_system_tags_from_path,
     get_name_and_tags_from_asset_path,
     resolve_destination_from_tags,
     validate_path_within_base,
@@ -101,7 +102,11 @@ def _ingest_file_from_path(
             if preview_id and ref.preview_id != preview_id:
                 ref.preview_id = preview_id
 
-            norm = normalize_tags(list(tags))
+            try:
+                backend_tags = get_backend_system_tags_from_path(locator)
+            except ValueError:
+                backend_tags = []
+            norm = normalize_tags([*list(tags), *backend_tags])
             if norm:
                 if require_existing_tags:
                     validate_tags_exist(session, norm)
@@ -474,6 +479,10 @@ def upload_from_temp_path(
         existing = get_asset_by_hash(session, asset_hash=asset_hash)
 
     if existing is not None:
+        # Once content is already known, duplicate byte uploads are treated as
+        # reference-only creation. Request tags are labels only here: do not
+        # require upload destination tags, do not move bytes, and do not
+        # synthesize path-derived classification or uploaded provenance.
         with contextlib.suppress(Exception):
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
@@ -535,7 +544,7 @@ def upload_from_temp_path(
         owner_id=owner_id,
         preview_id=preview_id,
         user_metadata=user_metadata or {},
-        tags=tags,
+        tags=[*(tags or []), "uploaded"],
         tag_origin="manual",
         require_existing_tags=False,
     )
@@ -569,15 +578,19 @@ def register_file_in_place(
 ) -> UploadResult:
     """Register an already-saved file in the asset database without moving it.
 
-    Tags are derived from the filesystem path (root category + subfolder names),
-    merged with any caller-provided tags, matching the behavior of the scanner.
+    This helper is used by upload paths that have already written bytes before
+    registering the file, so it records the same ``uploaded`` tag as the
+    multipart byte-upload path.
+
+    Tags are derived from trusted filesystem classification and merged with any
+    caller-provided tags, matching the behavior of the scanner.
     If the path is not under a known root, only the caller-provided tags are used.
     """
     try:
         _, path_tags = get_name_and_tags_from_asset_path(abs_path)
     except ValueError:
         path_tags = []
-    merged_tags = normalize_tags([*path_tags, *tags])
+    merged_tags = normalize_tags([*path_tags, *tags, "uploaded"])
 
     try:
         digest, _ = hashing.compute_blake3_hash(abs_path)

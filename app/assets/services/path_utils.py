@@ -3,10 +3,9 @@ from pathlib import Path
 from typing import Literal
 
 import folder_paths
-from app.assets.helpers import normalize_tags
 
 
-_NON_MODEL_FOLDER_NAMES = frozenset({"custom_nodes"})
+_NON_MODEL_FOLDER_NAMES = frozenset({"configs", "custom_nodes"})
 
 
 def get_comfy_models_folders() -> list[tuple[str, list[str]]]:
@@ -14,7 +13,7 @@ def get_comfy_models_folders() -> list[tuple[str, list[str]]]:
 
     Includes every category registered in folder_names_and_paths,
     regardless of whether its paths are under the main models_dir,
-    but excludes non-model entries like custom_nodes.
+    but excludes non-model entries like configs and custom_nodes.
     """
     targets: list[tuple[str, list[str]]] = []
     for name, values in folder_paths.folder_names_and_paths.items():
@@ -27,35 +26,37 @@ def get_comfy_models_folders() -> list[tuple[str, list[str]]]:
 
 
 def resolve_destination_from_tags(tags: list[str]) -> tuple[str, list[str]]:
-    """Validates and maps tags -> (base_dir, subdirs_for_fs)"""
-    if not tags:
-        raise ValueError("tags must not be empty")
-    root = tags[0].lower()
+    """Validates and maps upload routing tags -> (base_dir, subdirs_for_fs).
+
+    The request tags are only used to choose the write destination. Extra tags
+    remain labels; they do not become path components or trusted classification.
+    """
+    destination_roles = [t for t in tags if t in {"input", "models", "output"}]
+    if len(destination_roles) != 1:
+        raise ValueError("uploads require exactly one destination role: input, models, or output")
+
+    root = destination_roles[0]
     if root == "models":
-        if len(tags) < 2:
-            raise ValueError("at least two tags required for model asset")
+        model_type_tags = [t for t in tags if t.startswith("model_type:")]
+        if len(model_type_tags) != 1:
+            raise ValueError("models uploads require exactly one model_type:<folder_name> tag")
+        folder_name = model_type_tags[0].split(":", 1)[1]
+        if not folder_name:
+            raise ValueError("models uploads require exactly one model_type:<folder_name> tag")
+        model_folder_paths = dict(get_comfy_models_folders())
         try:
-            bases = folder_paths.folder_names_and_paths[tags[1]][0]
+            bases = model_folder_paths[folder_name]
         except KeyError:
-            raise ValueError(f"unknown model category '{tags[1]}'")
+            raise ValueError(f"unknown model category '{folder_name}'")
         if not bases:
-            raise ValueError(f"no base path configured for category '{tags[1]}'")
+            raise ValueError(f"no base path configured for category '{folder_name}'")
         base_dir = os.path.abspath(bases[0])
-        raw_subdirs = tags[2:]
     elif root == "input":
         base_dir = os.path.abspath(folder_paths.get_input_directory())
-        raw_subdirs = tags[1:]
-    elif root == "output":
-        base_dir = os.path.abspath(folder_paths.get_output_directory())
-        raw_subdirs = tags[1:]
     else:
-        raise ValueError(f"unknown root tag '{tags[0]}'; expected 'models', 'input', or 'output'")
-    _sep_chars = frozenset(("/", "\\", os.sep))
-    for i in raw_subdirs:
-        if i in (".", "..") or _sep_chars & set(i):
-            raise ValueError("invalid path component in tags")
+        base_dir = os.path.abspath(folder_paths.get_output_directory())
 
-    return base_dir, raw_subdirs if raw_subdirs else []
+    return base_dir, []
 
 
 def validate_path_within_base(candidate: str, base: str) -> None:
@@ -89,6 +90,25 @@ def compute_relative_filename(file_path: str) -> str | None:
         inside = parts[1:] if len(parts) > 1 else [parts[0]]
         return "/".join(inside)
     return "/".join(parts)  # input/output: keep all parts
+
+
+def compute_api_file_path(file_path: str | None) -> str | None:
+    """Return a stable API-visible path relative to a known asset root.
+
+    Examples:
+      /.../input/foo.png -> "input/foo.png"
+      /.../models/checkpoints/foo.safetensors -> "models/checkpoints/foo.safetensors"
+
+    Returns None for references without a filesystem path or paths outside
+    known asset roots.
+    """
+    if not file_path:
+        return None
+    try:
+        root_category, rel_path = get_asset_category_and_relative_path(file_path)
+    except ValueError:
+        return None
+    return "/".join([root_category, *Path(rel_path).parts])
 
 
 def get_asset_category_and_relative_path(
@@ -156,18 +176,55 @@ def get_asset_category_and_relative_path(
     )
 
 
+def get_backend_system_tags_from_path(path: str) -> list[str]:
+    """Return trusted backend tags derived from current filesystem facts.
+
+    The returned tags are only the backend-generated system tags: ``models``,
+    ``model_type:<folder_name>``, ``input``, ``output``, and ``temp``. Model
+    type tags are based on registered folder names, not path components.
+    """
+    fp_abs = os.path.abspath(path)
+    fp_path = Path(fp_abs)
+    tags: list[str] = []
+
+    def _add(tag: str) -> None:
+        if tag not in tags:
+            tags.append(tag)
+
+    for role, base in (
+        ("input", folder_paths.get_input_directory()),
+        ("output", folder_paths.get_output_directory()),
+        ("temp", folder_paths.get_temp_directory()),
+    ):
+        if fp_path.is_relative_to(os.path.abspath(base)):
+            _add(role)
+
+    model_types: list[str] = []
+    for folder_name, bases in get_comfy_models_folders():
+        for base in bases:
+            if fp_path.is_relative_to(os.path.abspath(base)):
+                model_types.append(folder_name)
+                break
+
+    if model_types:
+        _add("models")
+        for folder_name in model_types:
+            _add(f"model_type:{folder_name}")
+
+    if not tags:
+        raise ValueError(
+            f"Path is not within input, output, temp, or configured model bases: {path}"
+        )
+    return tags
+
+
 def get_name_and_tags_from_asset_path(file_path: str) -> tuple[str, list[str]]:
     """Return (name, tags) derived from a filesystem path.
 
     - name: base filename with extension
-    - tags: [root_category] + parent folder names in order
+    - tags: trusted backend classification tags derived from the path
 
     Raises:
         ValueError: path does not belong to any known root.
     """
-    root_category, some_path = get_asset_category_and_relative_path(file_path)
-    p = Path(some_path)
-    parent_parts = [
-        part for part in p.parent.parts if part not in (".", "..", p.anchor)
-    ]
-    return p.name, list(dict.fromkeys(normalize_tags([root_category, *parent_parts])))
+    return Path(file_path).name, get_backend_system_tags_from_path(file_path)

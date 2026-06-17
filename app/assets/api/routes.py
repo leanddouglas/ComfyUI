@@ -10,7 +10,6 @@ from typing import Any
 from aiohttp import web
 from pydantic import ValidationError
 
-import folder_paths
 from app import user_manager
 from app.assets.api import schemas_in, schemas_out
 from app.assets.services import schemas
@@ -40,6 +39,7 @@ from app.assets.services import (
     upload_from_temp_path,
 )
 from app.assets.services.cursor import InvalidCursorError
+from app.assets.services.path_utils import compute_api_file_path
 from app.assets.services.tagging import list_tag_histogram
 
 ROUTES = web.RouteTableDef()
@@ -169,6 +169,7 @@ def _build_asset_response(result: schemas.AssetDetailResult | schemas.UploadResu
         asset_hash=asset_content_hash,
         size=int(result.asset.size_bytes) if result.asset else None,
         mime_type=result.asset.mime_type if result.asset else None,
+        file_path=compute_api_file_path(result.ref.file_path),
         tags=result.tags,
         preview_url=preview_url,
         preview_id=result.ref.preview_id,
@@ -416,17 +417,6 @@ async def upload_asset(request: web.Request) -> web.Response:
             400, "INVALID_BODY", f"Validation failed: {ve.json()}"
         )
 
-    if spec.tags and spec.tags[0] == "models":
-        if (
-            len(spec.tags) < 2
-            or spec.tags[1] not in folder_paths.folder_names_and_paths
-        ):
-            delete_temp_file_if_exists(parsed.tmp_path)
-            category = spec.tags[1] if len(spec.tags) >= 2 else ""
-            return _build_error_response(
-                400, "INVALID_BODY", f"unknown models category '{category}'"
-            )
-
     try:
         # Fast path: hash exists, create AssetReference without writing anything
         if spec.hash and parsed.provided_hash_exists is True:
@@ -470,7 +460,7 @@ async def upload_asset(request: web.Request) -> web.Response:
         return _build_error_response(400, e.code, str(e))
     except ValueError as e:
         delete_temp_file_if_exists(parsed.tmp_path)
-        return _build_error_response(400, "BAD_REQUEST", str(e))
+        return _build_error_response(400, "INVALID_BODY", str(e))
     except HashMismatchError as e:
         delete_temp_file_if_exists(parsed.tmp_path)
         return _build_error_response(400, "HASH_MISMATCH", str(e))

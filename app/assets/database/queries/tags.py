@@ -294,7 +294,7 @@ def list_tags_with_usage(
     )
 
     if prefix:
-        escaped, esc = escape_sql_like_string(prefix.strip().lower())
+        escaped, esc = escape_sql_like_string(prefix.strip())
         q = q.where(Tag.name.like(escaped + "%", escape=esc))
 
     if not include_zero:
@@ -307,7 +307,7 @@ def list_tags_with_usage(
 
     total_q = select(func.count()).select_from(Tag)
     if prefix:
-        escaped, esc = escape_sql_like_string(prefix.strip().lower())
+        escaped, esc = escape_sql_like_string(prefix.strip())
         total_q = total_q.where(Tag.name.like(escaped + "%", escape=esc))
     if not include_zero:
         visible_tags_sq = (
