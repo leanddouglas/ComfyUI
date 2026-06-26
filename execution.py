@@ -1113,6 +1113,37 @@ def full_type_name(klass):
         return klass.__qualname__
     return module + '.' + klass.__qualname__
 
+def _v1_function_resolves(node):
+    """Whether node.FUNCTION names a callable on node (a class or an instance)."""
+    function_name = getattr(node, "FUNCTION", None)
+    return function_name is not None and callable(getattr(node, function_name, None))
+
+
+def node_not_executable_reason(class_def, class_type):
+    """Return a human-readable reason the node cannot be executed, or None if it's fine.
+
+    Catches a node whose declared entry point doesn't resolve to a real method
+    (e.g. a V1 ``FUNCTION = "invert"`` where the method is misspelled, or a V3 node
+    missing its ``execute`` override). Running this during validation surfaces the
+    problem before execution starts, instead of after upstream nodes have run.
+    """
+    try:
+        if issubclass(class_def, _ComfyNodeInternal):
+            # V3: validates that execute()/define_schema() overrides exist.
+            class_def.VALIDATE_CLASS()
+            return None
+        # V1: FUNCTION names the method to call. Check the class first (the common
+        # case); fall back to an instance, since the node is invoked on an instance
+        # and may define FUNCTION or its method in __init__.
+        if _v1_function_resolves(class_def) or _v1_function_resolves(class_def()):
+            return None
+        function_name = getattr(class_def, "FUNCTION", None)
+        if function_name is None:
+            return f"'{class_type}' does not define FUNCTION"
+        return f"'{class_type}' has no method '{function_name}' (declared in FUNCTION)"
+    except Exception as ex:
+        return str(ex)
+
 async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[str], None]):
     outputs = set()
     for x in prompt:
@@ -1147,6 +1178,35 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
                 }
             }
             return (False, error, [], {})
+
+        # Make sure the node is actually executable (its FUNCTION/execute entry
+        # point resolves to a real method) before we touch any schema-derived
+        # attributes below or start execution. Catches code typos up front and
+        # attributes the error to the offending node.
+        not_executable = node_not_executable_reason(class_, class_type)
+        if not_executable is not None:
+            node_title = prompt[x].get('_meta', {}).get('title', class_type)
+            error = {
+                "type": "invalid_node_definition",
+                "message": "Node is not executable",
+                "details": f"{not_executable} (Node ID '#{x}')",
+                "extra_info": {
+                    "node_id": x,
+                    "class_type": class_type,
+                    "node_title": node_title,
+                }
+            }
+            node_errors = {x: {
+                "errors": [{
+                    "type": "invalid_node_definition",
+                    "message": "Node is not executable",
+                    "details": not_executable,
+                    "extra_info": {},
+                }],
+                "dependent_outputs": [],
+                "class_type": class_type,
+            }}
+            return (False, error, [], node_errors)
 
         if hasattr(class_, 'OUTPUT_NODE') and class_.OUTPUT_NODE is True:
             if partial_execution_list is None or x in partial_execution_list:
