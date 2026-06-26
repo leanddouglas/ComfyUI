@@ -26,6 +26,26 @@ class _MalformedV1Node:
         return (None,)
 
 
+class _RaisingDescriptor:
+    def __get__(self, obj, owner):
+        raise RuntimeError("schema error")
+
+
+class _SchemaRaisesNode:
+    """A node whose schema-derived attribute access raises, as a broken V3 node would."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+    OUTPUT_NODE = _RaisingDescriptor()
+    CATEGORY = "Test"
+
+    def run(self):
+        return (None,)
+
+
 class _FakeOutputCache:
     def all_node_ids(self):
         return set()
@@ -45,6 +65,15 @@ def _make_execution_list(class_type, class_def):
 def test_malformed_function_does_not_crash_scheduler():
     """A FUNCTION-typo node schedules without raising; the error surfaces later."""
     execution_list = _make_execution_list("MalformedV1Node", _MalformedV1Node)
+    node_id, error, ex = asyncio.run(execution_list.stage_node_execution())
+    assert ex is None
+    assert error is None
+    assert node_id == "1"
+
+
+def test_schema_attribute_error_does_not_crash_scheduler():
+    """A node whose attribute access raises during heuristics still schedules."""
+    execution_list = _make_execution_list("SchemaRaisesNode", _SchemaRaisesNode)
     node_id, error, ex = asyncio.run(execution_list.stage_node_execution())
     assert ex is None
     assert error is None
