@@ -10,6 +10,8 @@ class Asset(BaseModel):
 
     id: str
     name: str
+    # Mirrors `name` for backwards compatibility.
+    display_name: str | None = None
     hash: str | None = None
     asset_hash: str | None = None
     size: int | None = None

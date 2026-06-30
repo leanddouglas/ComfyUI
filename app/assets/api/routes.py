@@ -165,6 +165,8 @@ def _build_asset_response(result: schemas.AssetDetailResult | schemas.UploadResu
     return schemas_out.Asset(
         id=result.ref.id,
         name=result.ref.name,
+        # Mirror name for backwards compatibility; ref.name is always set.
+        display_name=result.ref.name,
         hash=asset_content_hash,
         asset_hash=asset_content_hash,
         size=int(result.asset.size_bytes) if result.asset else None,
@@ -219,6 +221,7 @@ async def list_assets_route(request: web.Request) -> web.Response:
             exclude_tags=q.exclude_tags,
             name_contains=q.name_contains,
             metadata_filter=q.metadata_filter,
+            asset_hash=q.hash,
             limit=q.limit,
             offset=q.offset,
             sort=sort,
