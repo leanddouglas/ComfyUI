@@ -1,10 +1,12 @@
 """Tests for bulk ingest services."""
 
+import os
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
 from app.assets.database.models import Asset, AssetReference
+from app.assets.database.queries import get_reference_tags
 from app.assets.services.bulk_ingest import SeedAssetSpec, batch_insert_seed_assets
 
 
@@ -100,6 +102,96 @@ class TestBatchInsertSeedAssets:
             assert ref is not None
             asset = session.query(Asset).filter_by(id=ref.asset_id).first()
             assert asset.mime_type == expected_mime, f"Expected {expected_mime} for {filename}, got {asset.mime_type}"
+
+    def test_duplicate_paths_merge_tags_before_insert(
+        self, session: Session, temp_dir: Path
+    ):
+        """Overlapping model-folder registrations can emit the same path twice."""
+        file_path = temp_dir / "shared.safetensors"
+        file_path.write_bytes(b"shared model")
+
+        specs: list[SeedAssetSpec] = [
+            {
+                "abs_path": str(file_path),
+                "size_bytes": 12,
+                "mtime_ns": 1234567890000000000,
+                "info_name": "Shared Model",
+                "tags": ["models", "model_type:checkpoints"],
+                "fname": "shared.safetensors",
+                "metadata": None,
+                "hash": None,
+                "mime_type": "application/safetensors",
+            },
+            {
+                "abs_path": str(file_path),
+                "size_bytes": 12,
+                "mtime_ns": 1234567890000000000,
+                "info_name": "Shared Model",
+                "tags": ["models", "model_type:diffusion_models"],
+                "fname": "shared.safetensors",
+                "metadata": None,
+                "hash": None,
+                "mime_type": "application/safetensors",
+            },
+        ]
+
+        result = batch_insert_seed_assets(session, specs=specs, owner_id="")
+
+        assert result.inserted_refs == 1
+        assert result.won_paths == 1
+        refs = session.query(AssetReference).all()
+        assert len(refs) == 1
+        assert set(get_reference_tags(session, reference_id=refs[0].id)) == {
+            "models",
+            "model_type:checkpoints",
+            "model_type:diffusion_models",
+        }
+
+    def test_duplicate_paths_are_merged_after_abspath_normalization(
+        self, session: Session, temp_dir: Path
+    ):
+        """The scanner may emit equivalent paths with different spelling."""
+        file_path = temp_dir / "same-file.safetensors"
+        file_path.write_bytes(b"shared model")
+        relative_path = os.path.relpath(file_path, Path.cwd())
+
+        specs: list[SeedAssetSpec] = [
+            {
+                "abs_path": relative_path,
+                "size_bytes": 12,
+                "mtime_ns": 1234567890000000000,
+                "info_name": "Shared Model",
+                "tags": ["models", "model_type:checkpoints"],
+                "fname": "same-file.safetensors",
+                "metadata": None,
+                "hash": None,
+                "mime_type": "application/safetensors",
+            },
+            {
+                "abs_path": str(file_path),
+                "size_bytes": 12,
+                "mtime_ns": 1234567890000000000,
+                "info_name": "Shared Model",
+                "tags": ["models", "model_type:diffusion_models"],
+                "fname": "same-file.safetensors",
+                "metadata": None,
+                "hash": None,
+                "mime_type": "application/safetensors",
+            },
+        ]
+
+        result = batch_insert_seed_assets(session, specs=specs, owner_id="")
+
+        assert result.inserted_refs == 1
+        assert result.won_paths == 1
+        refs = session.query(AssetReference).all()
+        assert len(refs) == 1
+        assert refs[0].file_path == str(file_path)
+        assert set(get_reference_tags(session, reference_id=refs[0].id)) == {
+            "models",
+            "model_type:checkpoints",
+            "model_type:diffusion_models",
+        }
 
 
 class TestMetadataExtraction:

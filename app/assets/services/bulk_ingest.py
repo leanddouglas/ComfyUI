@@ -134,6 +134,14 @@ def batch_insert_seed_assets(
 
     for spec in specs:
         absolute_path = os.path.abspath(spec["abs_path"])
+        existing_asset_id = path_to_asset_id.get(absolute_path)
+        if existing_asset_id is not None:
+            existing_tags = asset_id_to_ref_data[existing_asset_id]["tags"]
+            asset_id_to_ref_data[existing_asset_id]["tags"] = list(
+                dict.fromkeys([*existing_tags, *spec["tags"]])
+            )
+            continue
+
         asset_id = str(uuid.uuid4())
         reference_id = str(uuid.uuid4())
         absolute_path_list.append(absolute_path)
