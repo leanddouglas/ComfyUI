@@ -35,7 +35,7 @@ def _sanitize_filename_component(name: str) -> str:
 
 
 def _short_hash(*parts: str, length: int = 10) -> str:
-    return hashlib.sha1(("|".join(parts)).encode("utf-8")).hexdigest()[:length]
+    return hashlib.sha1(("|".join(parts)).encode("utf-8"), usedforsecurity=False).hexdigest()[:length]
 
 
 def _build_log_filepath(log_dir: str, operation_id: str, request_url: str) -> str:
