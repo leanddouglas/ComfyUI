@@ -8,6 +8,14 @@ A friendly 3D cartoon mascot of a professional cleaning service worker, young ad
 
 Negative prompt: photorealistic human, dirty clothing, cluttered background, unreadable text, distorted hands, extra fingers, harsh shadows, low resolution, scary expression, wrong colors.
 
+## Smoke-test command
+
+```bash
+source .venv/bin/activate
+python main.py --listen 127.0.0.1 --port 8199 --disable-auto-launch --disable-all-custom-nodes
+python scripts/servus_smoke_generate.py http://127.0.0.1:8199
+```
+
 ## Audit summary
 
 Audited upstream ComfyUI at commit `2c935de1b1cf7f03d2412a1d0bf1ed2685157c27`.
